@@ -1,0 +1,22 @@
+# Credentials — never commit the real .env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# ReviewBot runtime
+.reviewbot/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+#claude
+.claude
