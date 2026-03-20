@@ -1,2 +1,5 @@
 python-gitlab>=4.0.0
 python-dotenv>=1.0.0
+
+# dev/testing
+# pip install pytest pytest-mock
