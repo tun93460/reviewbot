@@ -1,36 +1,8 @@
-from dataclasses import dataclass
 from typing import Any
 
 import gitlab
 
-
-@dataclass
-class MRData:
-    project_path: str
-    mr_iid: int
-    title: str
-    description: str
-    author: str
-    source_branch: str
-    target_branch: str
-    diff_files: list[dict]
-    total_changes: int
-    web_url: str = ""
-    pipeline_status: str | None = None
-    pipeline_url: str | None = None
-
-
-@dataclass
-class MRSummary:
-    iid: int
-    title: str
-    author: str
-    source_branch: str
-    target_branch: str
-    created_at: str
-    updated_at: str
-    web_url: str
-    pipeline_status: str | None = None
+from reviewbot.models import MRData, MRSummary, _extract_position
 
 
 class GitLabClient:
@@ -49,6 +21,7 @@ class GitLabClient:
         project = self.gl.projects.get(project_path)
         mr = project.mergerequests.get(mr_iid)
         changes: Any = mr.changes()
+        diff_truncated: bool = bool(changes.get("overflow", False))
 
         diff_files = []
         total_changes = 0
@@ -63,6 +36,7 @@ class GitLabClient:
                 "new_file": change.get("new_file", False),
                 "deleted_file": change.get("deleted_file", False),
                 "renamed_file": change.get("renamed_file", False),
+                "too_large": change.get("too_large", False),
                 "line_count": line_count,
             }
             if include_full and file_entry.get("new_path"):
@@ -120,10 +94,45 @@ class GitLabClient:
             target_branch=mr.target_branch,
             diff_files=diff_files,
             total_changes=total_changes,
+            diff_truncated=diff_truncated,
             web_url=mr.web_url,
             pipeline_status=pipeline_status,
             pipeline_url=pipeline_url,
         )
+
+    def get_mr_comments(
+        self,
+        project_path: str,
+        mr_iid: int,
+        include_system: bool = False,
+    ) -> list[dict]:
+        """Return all notes/discussions on an MR as a flat list.
+
+        System notes (e.g. "pushed commit X", "approved this MR") are excluded
+        by default; pass include_system=True to include them.
+        """
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(mr_iid)
+        discussions = mr.discussions.list(get_all=True)
+
+        results = []
+        for disc in discussions:
+            disc_attrs = disc.attributes
+            disc_id = disc_attrs.get("id", "")
+            for note in disc_attrs.get("notes", []):
+                if not include_system and note.get("system", False):
+                    continue
+                results.append({
+                    "id": note.get("id"),
+                    "discussion_id": disc_id,
+                    "author": note.get("author", {}).get("username", ""),
+                    "body": note.get("body", ""),
+                    "created_at": note.get("created_at"),
+                    "resolvable": note.get("resolvable", False),
+                    "resolved": note.get("resolved", False),
+                    "position": _extract_position(note.get("position")),
+                })
+        return results
 
     def list_open_mrs(
         self,
@@ -218,3 +227,62 @@ class GitLabClient:
         mr = project.mergerequests.get(mr_iid)
         note = mr.notes.create({"body": body})
         return note.attributes.get("id", "")
+
+    def post_mr_inline_note(
+        self,
+        project_path: str,
+        mr_iid: int,
+        body: str,
+        file_path: str,
+        new_line: int | None,
+        old_line: int | None,
+    ) -> dict:
+        """Post an inline comment on a specific line of a file in an MR."""
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(mr_iid)
+
+        diff_refs = mr.attributes.get("diff_refs") or {}
+        base_sha = diff_refs.get("base_sha")
+        start_sha = diff_refs.get("start_sha")
+        head_sha = diff_refs.get("head_sha")
+        if not (base_sha and start_sha and head_sha):
+            raise ValueError("MR has no diff_refs — cannot post inline comment (MR may have no commits yet)")
+
+        position: dict[str, Any] = {
+            "position_type": "text",
+            "base_sha": base_sha,
+            "start_sha": start_sha,
+            "head_sha": head_sha,
+            "new_path": file_path,
+            "old_path": file_path,
+        }
+        if new_line is not None:
+            position["new_line"] = new_line
+        if old_line is not None:
+            position["old_line"] = old_line
+
+        discussion = mr.discussions.create({"body": body, "position": position})
+        disc_attrs = discussion.attributes
+        notes = disc_attrs.get("notes", [])
+        note_id = notes[0].get("id", "") if notes else ""
+        return {
+            "note_id": note_id,
+            "discussion_id": disc_attrs.get("id", ""),
+            "project": project_path,
+            "mr_iid": mr_iid,
+            "file_path": file_path,
+        }
+
+    def get_file_content(
+        self,
+        project_path: str,
+        file_path: str,
+        ref: str = "HEAD",
+    ) -> str:
+        """Fetch the content of any file in the repository at a given ref."""
+        project = self.gl.projects.get(project_path)
+        file_obj = project.files.get(file_path=file_path, ref=ref)
+        content = file_obj.decode()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        return content

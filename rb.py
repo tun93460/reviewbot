@@ -3,15 +3,17 @@
 ReviewBot CLI — GitLab MR data fetcher for use within Claude Code.
 
 Usage:
-  python rb.py list  <project> [--assigned] [--limit N] [--json]
-  python rb.py info  <project> <mr_iid>
-  python rb.py diff  <project> <mr_iid> [--file PATH]
-  python rb.py post  <project> <mr_iid> [body|-]
+  python rb.py list     <project> [--assigned] [--limit N] [--json]
+  python rb.py info     <project> <mr_iid>
+  python rb.py diff     <project> <mr_iid> [--file PATH] [--full]
+  python rb.py comments <project> <mr_iid> [--system]
+  python rb.py post     <project> <mr_iid> [body|-] [--file PATH --line N] [--old-line N]
+  python rb.py file     <project> <file_path> [--ref REF]
 
 <project> can be a namespace/repo path (e.g. group/repo) or a full GitLab MR URL.
 When a URL is given, <mr_iid> is parsed from it automatically.
 
-Data goes to stdout (JSON or diff text). Progress goes to stderr.
+Data goes to stdout (JSON or raw text). Progress goes to stderr.
 Exit code 0 on success, non-zero on error.
 """
 import argparse
@@ -108,6 +110,7 @@ def cmd_info(args: argparse.Namespace, config: AppConfig) -> None:
             "web_url": mr.web_url,
             "description": mr.description,
             "total_changes": mr.total_changes,
+            "diff_truncated": mr.diff_truncated,
             "file_count": len(mr.diff_files),
             "files": [
                 {
@@ -116,6 +119,7 @@ def cmd_info(args: argparse.Namespace, config: AppConfig) -> None:
                     "new_file": f.get("new_file", False),
                     "deleted_file": f.get("deleted_file", False),
                     "renamed_file": f.get("renamed_file", False),
+                    "too_large": f.get("too_large", False),
                     "line_count": f.get("line_count", 0),
                 }
                 for f in mr.diff_files
@@ -130,7 +134,15 @@ def cmd_info(args: argparse.Namespace, config: AppConfig) -> None:
 def cmd_diff(args: argparse.Namespace, config: AppConfig) -> None:
     project, mr_iid = parse_mr_target(args.project, getattr(args, "mr_iid", None))
     client = build_client(config)
-    mr = client.get_merge_request(project, mr_iid, include_full=getattr(args, "full", False))
+    mr = client.get_merge_request(
+        project, mr_iid,
+        include_full=getattr(args, "full", False),
+        include_blame=getattr(args, "blame", False),
+    )
+
+    if mr.diff_truncated:
+        progress("WARNING: diff is truncated — this MR exceeds GitLab's diff size limit. "
+                 "Use --file to review individual files, or `rb.py file` for full content.")
 
     files = mr.diff_files
     if args.file:
@@ -146,11 +158,24 @@ def cmd_diff(args: argparse.Namespace, config: AppConfig) -> None:
             label += "  (new file)"
         elif f.get("deleted_file"):
             label += "  (deleted)"
+        if f.get("too_large"):
+            label += "  [TRUNCATED — use --full or `rb.py file` for complete content]"
         print(f"\n=== {label} ===")
         if getattr(args, "full", False) and f.get("full_text"):
             print(f["full_text"])
         else:
             print(f["diff"])
+        if getattr(args, "blame", False) and f.get("blame"):
+            print(f"\n--- blame: {f['new_path']} ---")
+            print("\n".join(f["blame"]))
+
+
+def cmd_comments(args: argparse.Namespace, config: AppConfig) -> None:
+    project, mr_iid = parse_mr_target(args.project, getattr(args, "mr_iid", None))
+    client = build_client(config)
+    progress(f"Fetching comments for !{mr_iid} ...")
+    comments = client.get_mr_comments(project, mr_iid, include_system=args.system)
+    print(json.dumps(comments, indent=2))
 
 
 def cmd_post(args: argparse.Namespace, config: AppConfig) -> None:
@@ -159,8 +184,29 @@ def cmd_post(args: argparse.Namespace, config: AppConfig) -> None:
     body = sys.stdin.read() if (args.body == "-" or not args.body) else args.body
     if not body.strip():
         err("comment body is empty")
-    note_id = client.post_mr_note(project, mr_iid, body)
-    print(json.dumps({"note_id": note_id, "project": project, "mr_iid": mr_iid}))
+
+    file_path = getattr(args, "file", None)
+    new_line = getattr(args, "line", None)
+    old_line = getattr(args, "old_line", None)
+
+    if file_path is not None:
+        if new_line is None and old_line is None:
+            err("--file requires --line or --old-line")
+        result = client.post_mr_inline_note(project, mr_iid, body, file_path, new_line, old_line)
+        print(json.dumps(result))
+    else:
+        if new_line is not None or old_line is not None:
+            err("--line and --old-line require --file")
+        note_id = client.post_mr_note(project, mr_iid, body)
+        print(json.dumps({"note_id": note_id, "project": project, "mr_iid": mr_iid}))
+
+
+def cmd_file(args: argparse.Namespace, config: AppConfig) -> None:
+    client = build_client(config)
+    ref = args.ref or "HEAD"
+    progress(f"Fetching {args.file_path} @ {ref} ...")
+    content = client.get_file_content(args.project, args.file_path, ref=ref)
+    sys.stdout.write(content)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("mr_iid", type=int, nargs="?", help="Merge request IID (omit when project is a URL)")
     p_diff.add_argument("--file", metavar="PATH", help="Show diff for a single file only")
     p_diff.add_argument("--full", action="store_true", help="Show full file content instead of diff (useful for full context review)")
+    p_diff.add_argument("--blame", action="store_true", help="Append git blame annotation for each changed file")
+
+    # --- comments ---
+    p_comments = sub.add_parser("comments", help="List existing notes/discussions on a merge request")
+    p_comments.add_argument("project", help="GitLab project path or full MR URL")
+    p_comments.add_argument("mr_iid", type=int, nargs="?", help="Merge request IID (omit when project is a URL)")
+    p_comments.add_argument("--system", action="store_true", help="Include system notes (e.g. 'pushed commit X', 'approved')")
 
     # --- post ---
     p_post = sub.add_parser("post", help="Post a comment to a merge request")
@@ -206,6 +259,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="-",
         help="Comment body, or '-' to read from stdin (default: stdin)",
     )
+    p_post.add_argument("--file", metavar="PATH", help="File path for an inline comment")
+    p_post.add_argument("--line", metavar="N", type=int, help="New-side line number for an inline comment")
+    p_post.add_argument("--old-line", metavar="N", type=int, dest="old_line", help="Old-side line number (use for removed lines)")
+
+    # --- file ---
+    p_file = sub.add_parser("file", help="Fetch a file from the repository at a given ref")
+    p_file.add_argument("project", help="GitLab project path")
+    p_file.add_argument("file_path", help="Path to the file within the repository")
+    p_file.add_argument("--ref", default="HEAD", metavar="REF", help="Branch, tag, or commit SHA (default: HEAD)")
 
     return parser
 
@@ -225,7 +287,9 @@ def main() -> None:
         "list": cmd_list,
         "info": cmd_info,
         "diff": cmd_diff,
+        "comments": cmd_comments,
         "post": cmd_post,
+        "file": cmd_file,
     }
     try:
         dispatch[args.command](args, config)

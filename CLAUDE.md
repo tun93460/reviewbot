@@ -5,10 +5,12 @@ GitLab MR data fetcher for Claude Code. Claude does the reviewing — these scri
 ## Commands
 
 ```bash
-python rb.py list  <project> [--assigned] [--limit N] [--json]
-python rb.py info  <project> [mr_iid]
-python rb.py diff  <project> [mr_iid] [--file PATH] [--full]
-python rb.py post  <project> [mr_iid] [body|-]
+python rb.py list     <project> [--assigned] [--limit N] [--json]
+python rb.py info     <project> [mr_iid]
+python rb.py diff     <project> [mr_iid] [--file PATH] [--full] [--blame]
+python rb.py comments <project> [mr_iid] [--system]
+python rb.py post     <project> [mr_iid] [body|-] [--file PATH --line N] [--old-line N]
+python rb.py file     <project> <file_path> [--ref REF]
 ```
 
 `<project>` is either a namespace/repo path (e.g. `group/repo`) or a **full GitLab MR URL** — when a URL is given, `mr_iid` is parsed from it automatically.
@@ -31,13 +33,34 @@ Add `--debug` to any command for full tracebacks.
 3. **Get the diff** — read the actual changes
    ```bash
    python rb.py diff cca/edio/cca-lms 42
-   python rb.py diff cca/edio/cca-lms 42 --file src/foo.py   # single file
-   python rb.py diff cca/edio/cca-lms 42 --file src/foo.py --full  # full file text (best for accessibility/context review)
+   python rb.py diff cca/edio/cca-lms 42 --file src/foo.py          # single file
+   python rb.py diff cca/edio/cca-lms 42 --file src/foo.py --full   # full file text (best for accessibility/context review)
+   python rb.py diff cca/edio/cca-lms 42 --file src/foo.py --blame  # append git blame per file
+   ```
+   If the MR exceeds GitLab's diff size limit, a `WARNING: diff is truncated` message appears on stderr and `diff_truncated: true` is set in `info` output. Individual files that are too large are flagged `[TRUNCATED]` in the header. Use `--file` to review files one at a time, or `rb.py file` for full content.
+
+4. **Read existing comments** — check what's already been said before reviewing
+   ```bash
+   python rb.py comments cca/edio/cca-lms 42
+   ```
+   Returns: flat list of notes with author, body, resolved status, and inline position (file + line) if applicable. System notes (push events, approvals) are excluded by default.
+
+5. **Fetch context files** — get the full content of any file in the repo, not just changed files
+   ```bash
+   python rb.py file cca/edio/cca-lms src/base_component.py
+   python rb.py file cca/edio/cca-lms src/base_component.py --ref main
    ```
 
-4. **Post a comment** — submit the review back to GitLab
+6. **Post a comment** — submit the review back to GitLab
    ```bash
+   # Top-level MR comment
    echo "review text" | python rb.py post cca/edio/cca-lms 42
+
+   # Inline comment on a specific line
+   echo "missing alt text" | python rb.py post cca/edio/cca-lms 42 --file src/Modal.vue --line 34
+
+   # Inline comment on a removed line
+   echo "glad this was removed" | python rb.py post cca/edio/cca-lms 42 --file src/old.py --old-line 12
    ```
 
 ## Output conventions
@@ -63,7 +86,8 @@ Add `--debug` to any command for full tracebacks.
 rb.py                   # CLI entry point — all subcommands
 reviewbot/
   config.py             # AppConfig dataclass — loads .env
-  gitlab_client.py      # GitLabClient, MRData, MRSummary
+  models.py             # MRData, MRSummary dataclasses; _extract_position helper
+  gitlab_client.py      # GitLabClient — all API interaction
 ```
 
 ---
