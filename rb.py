@@ -130,7 +130,7 @@ def cmd_info(args: argparse.Namespace, config: AppConfig) -> None:
 def cmd_diff(args: argparse.Namespace, config: AppConfig) -> None:
     project, mr_iid = parse_mr_target(args.project, getattr(args, "mr_iid", None))
     client = build_client(config)
-    mr = client.get_merge_request(project, mr_iid)
+    mr = client.get_merge_request(project, mr_iid, include_full=getattr(args, "full", False))
 
     files = mr.diff_files
     if args.file:
@@ -147,7 +147,10 @@ def cmd_diff(args: argparse.Namespace, config: AppConfig) -> None:
         elif f.get("deleted_file"):
             label += "  (deleted)"
         print(f"\n=== {label} ===")
-        print(f["diff"])
+        if getattr(args, "full", False) and f.get("full_text"):
+            print(f["full_text"])
+        else:
+            print(f["diff"])
 
 
 def cmd_post(args: argparse.Namespace, config: AppConfig) -> None:
@@ -191,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("project", help="GitLab project path or full MR URL")
     p_diff.add_argument("mr_iid", type=int, nargs="?", help="Merge request IID (omit when project is a URL)")
     p_diff.add_argument("--file", metavar="PATH", help="Show diff for a single file only")
+    p_diff.add_argument("--full", action="store_true", help="Show full file content instead of diff (useful for full context review)")
 
     # --- post ---
     p_post = sub.add_parser("post", help="Post a comment to a merge request")
