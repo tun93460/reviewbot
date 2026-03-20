@@ -175,4 +175,4 @@ class TestCmdDiff:
         with patch("rb.build_client", return_value=client):
             cmd_diff(args, MagicMock())
 
-        assert "TRUNCATED" in capsys.readouterr().out
+        assert "truncated" in capsys.readouterr().out

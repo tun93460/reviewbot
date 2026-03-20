@@ -25,6 +25,7 @@ from typing import NoReturn
 
 from reviewbot.config import AppConfig
 from reviewbot.gitlab_client import GitLabClient
+from reviewbot import style
 
 
 _MR_URL_RE = re.compile(r"https?://[^/]+/(.+?)/-/merge_requests/(\d+)")
@@ -33,12 +34,14 @@ _debug = False
 
 
 def err(msg: str) -> NoReturn:
-    print(f"error: {msg}", file=sys.stderr)
+    marker = style.red("✗", sys.stderr)
+    print(f"  {marker} {msg}", file=sys.stderr)
     sys.exit(1)
 
 
 def progress(msg: str) -> None:
-    print(f">> {msg}", file=sys.stderr, flush=True)
+    indicator = style.dim("›", sys.stderr)
+    print(f"  {indicator} {msg}", file=sys.stderr, flush=True)
 
 
 def parse_mr_target(project_arg: str, iid_arg: int | None) -> tuple[str, int]:
@@ -86,13 +89,15 @@ def cmd_list(args: argparse.Namespace, config: AppConfig) -> None:
         return
 
     if not mrs:
-        print("No open merge requests found.")
+        print(style.dim("  No open merge requests found."))
         return
     for m in mrs:
-        pipe = f" [{m.pipeline_status}]" if m.pipeline_status else ""
-        print(f"!{m.iid:<6} {m.author:<20} {m.title[:55]:<55}{pipe}")
-        print(f"         {m.source_branch} → {m.target_branch}")
-        print(f"         {m.web_url}")
+        iid = style.cyan(f"!{m.iid}", sys.stdout)
+        title = style.bold(m.title[:60], sys.stdout)
+        pipe = f"  {style.pipeline(m.pipeline_status)}" if m.pipeline_status else ""
+        print(f"  {iid}  {title}{pipe}")
+        print(f"       {style.dim(f'{m.source_branch} → {m.target_branch}', sys.stdout)}")
+        print(f"       {style.dim(m.web_url, sys.stdout)}")
         print()
 
 
@@ -151,22 +156,34 @@ def cmd_diff(args: argparse.Namespace, config: AppConfig) -> None:
             err(f"file '{args.file}' not found in this MR")
 
     for f in files:
-        label = f["new_path"]
         if f.get("renamed_file"):
             label = f"{f['old_path']} → {f['new_path']}"
-        elif f.get("new_file"):
-            label += "  (new file)"
+        else:
+            label = f["new_path"]
+
+        notes = []
+        if f.get("new_file"):
+            notes.append("new file")
         elif f.get("deleted_file"):
-            label += "  (deleted)"
+            notes.append("deleted")
         if f.get("too_large"):
-            label += "  [TRUNCATED — use --full or `rb.py file` for complete content]"
-        print(f"\n=== {label} ===")
+            notes.append("truncated — use --full or `rb.py file` for full content")
+        note_str = style.dim(f"  ({', '.join(notes)})", sys.stdout) if notes else ""
+
+        if f.get("new_file"):
+            header = style.green(label, sys.stdout)
+        elif f.get("deleted_file"):
+            header = style.red(label, sys.stdout)
+        else:
+            header = style.bold(label, sys.stdout)
+
+        print(f"\n  {header}{note_str}")
         if getattr(args, "full", False) and f.get("full_text"):
             print(f["full_text"])
         else:
             print(f["diff"])
         if getattr(args, "blame", False) and f.get("blame"):
-            print(f"\n--- blame: {f['new_path']} ---")
+            print(style.dim(f"\n  ── blame: {f['new_path']} ──", sys.stdout))
             print("\n".join(f["blame"]))
 
 
